@@ -396,7 +396,7 @@ class QuantumFunction(Function):
     @staticmethod
     def convert_to_tensor(circuit, n_dim: int):
         try:
-            from cuquantum import CircuitToEinsum
+            from cuquantum.tensornet import CircuitToEinsum
         except ImportError as e:
             raise ImportError("Quantum attention requires cuQuantum (cuquantum) to be installed.") from e
 
