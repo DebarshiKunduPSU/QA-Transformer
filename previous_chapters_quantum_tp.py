@@ -145,90 +145,90 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer("mask", torch.triu(torch.ones(context_length, context_length), diagonal=1))
 
     def forward(self, x):
-    b, num_tokens, _ = x.shape
-
-    q = self.W_query(x)
-    k = self.W_key(x)
-    v = self.W_value(x)
-
-    # -> (B, heads, T, head_dim)
-    q = q.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
-    k = k.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
-    v = v.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
-
-    # Tensor-parallel over query tokens (rows of the score matrix)
-    if self.tensor_parallel and _dist_is_initialized():
-        rank, world = _tp_get_rank_world(group=self.tp_group)
-        q_start, q_end = _tp_token_partition(num_tokens, rank, world)
-    else:
-        q_start, q_end = 0, num_tokens
-
-    mask_bool_full = self.mask.bool()[:num_tokens, :num_tokens]
-    mask_local = mask_bool_full[q_start:q_end, :]
-
-    # Precompute absolute positional angles for keys/queries if enabled
-    pos_full = None
-    if self.quantum_heads > 0:
-        if self.qattn[0].use_quantum_pos:
-            pos_full = self.qattn[0].sinusoidal_pos_angles(num_tokens, self.n_qubits, x.device)  # (T, n_qubits)
-            pos_full = pos_full.unsqueeze(0).expand(b, -1, -1)  # (B,T,n_qubits)
+        b, num_tokens, _ = x.shape
+    
+        q = self.W_query(x)
+        k = self.W_key(x)
+        v = self.W_value(x)
+    
+        # -> (B, heads, T, head_dim)
+        q = q.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(b, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+    
+        # Tensor-parallel over query tokens (rows of the score matrix)
+        if self.tensor_parallel and _dist_is_initialized():
+            rank, world = _tp_get_rank_world(group=self.tp_group)
+            q_start, q_end = _tp_token_partition(num_tokens, rank, world)
         else:
-            pos_full = torch.zeros((b, num_tokens, self.n_qubits), device=x.device, dtype=torch.float32)
-
-    head_outs = []
-
-    # Quantum heads
-    for h in range(self.quantum_heads):
-        qh_local = q[:, h, q_start:q_end, :]      # (B, Tq, head_dim)
-        kh_full  = k[:, h, :, :]                  # (B, T, head_dim)
-        vh_full  = v[:, h, :, :]                  # (B, T, head_dim)
-
-        q_proj = self._proj_angles(qh_local, h, "q")
-        k_proj = self._proj_angles(kh_full,  h, "k")
-
-        q_ang = self._to_angles(q_proj).to(torch.float32)   # (B, Tq, n_qubits)
-        k_ang = self._to_angles(k_proj).to(torch.float32)   # (B, T,  n_qubits)
-
-        pos1_local = pos_full[:, q_start:q_end, :] if pos_full is not None else None
-        pos2_full  = pos_full
-
-        scores_local = self.qattn[h](q_ang, k_ang, pos1=pos1_local, pos2=pos2_full).to(torch.float32)  # (B,Tq,T)
-        scores_local = scores_local.masked_fill(mask_local, -1e9)
-
-        attn_weights = torch.softmax(scores_local / self.softmax_temp, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        ctx_local = attn_weights @ vh_full  # (B,Tq,head_dim)
-        head_outs.append(ctx_local)
-
-    # Classical heads (cheap) — we still compute only local query rows for correct TP behavior
-    if self.quantum_heads < self.num_heads:
-        for h in range(self.quantum_heads, self.num_heads):
-            qh_local = q[:, h, q_start:q_end, :]
-            kh_full  = k[:, h, :, :]
-            vh_full  = v[:, h, :, :]
-
-            scores_local = qh_local @ kh_full.transpose(1, 2)  # (B,Tq,T)
+            q_start, q_end = 0, num_tokens
+    
+        mask_bool_full = self.mask.bool()[:num_tokens, :num_tokens]
+        mask_local = mask_bool_full[q_start:q_end, :]
+    
+        # Precompute absolute positional angles for keys/queries if enabled
+        pos_full = None
+        if self.quantum_heads > 0:
+            if self.qattn[0].use_quantum_pos:
+                pos_full = self.qattn[0].sinusoidal_pos_angles(num_tokens, self.n_qubits, x.device)  # (T, n_qubits)
+                pos_full = pos_full.unsqueeze(0).expand(b, -1, -1)  # (B,T,n_qubits)
+            else:
+                pos_full = torch.zeros((b, num_tokens, self.n_qubits), device=x.device, dtype=torch.float32)
+    
+        head_outs = []
+    
+        # Quantum heads
+        for h in range(self.quantum_heads):
+            qh_local = q[:, h, q_start:q_end, :]      # (B, Tq, head_dim)
+            kh_full  = k[:, h, :, :]                  # (B, T, head_dim)
+            vh_full  = v[:, h, :, :]                  # (B, T, head_dim)
+    
+            q_proj = self._proj_angles(qh_local, h, "q")
+            k_proj = self._proj_angles(kh_full,  h, "k")
+    
+            q_ang = self._to_angles(q_proj).to(torch.float32)   # (B, Tq, n_qubits)
+            k_ang = self._to_angles(k_proj).to(torch.float32)   # (B, T,  n_qubits)
+    
+            pos1_local = pos_full[:, q_start:q_end, :] if pos_full is not None else None
+            pos2_full  = pos_full
+    
+            scores_local = self.qattn[h](q_ang, k_ang, pos1=pos1_local, pos2=pos2_full).to(torch.float32)  # (B,Tq,T)
             scores_local = scores_local.masked_fill(mask_local, -1e9)
-
-            attn_weights = torch.softmax(scores_local / math.sqrt(self.head_dim), dim=-1)
+    
+            attn_weights = torch.softmax(scores_local / self.softmax_temp, dim=-1)
             attn_weights = self.dropout(attn_weights)
-
-            ctx_local = attn_weights @ vh_full
+    
+            ctx_local = attn_weights @ vh_full  # (B,Tq,head_dim)
             head_outs.append(ctx_local)
-
-    # concat heads: (B, Tq, C)
-    context_local = torch.cat(head_outs, dim=-1)
-
-    # output projection is per-token; do it locally then gather (less communication)
-    context_local = self.out_proj(context_local)
-
-    # gather token blocks back to full sequence if tensor-parallel
-    if self.tensor_parallel and _dist_is_initialized():
-        context_full = AllGatherTokens.apply(context_local, self.tp_group)  # (B, T, C)
-        return context_full
-
-    return context_local
+    
+        # Classical heads (cheap) — we still compute only local query rows for correct TP behavior
+        if self.quantum_heads < self.num_heads:
+            for h in range(self.quantum_heads, self.num_heads):
+                qh_local = q[:, h, q_start:q_end, :]
+                kh_full  = k[:, h, :, :]
+                vh_full  = v[:, h, :, :]
+    
+                scores_local = qh_local @ kh_full.transpose(1, 2)  # (B,Tq,T)
+                scores_local = scores_local.masked_fill(mask_local, -1e9)
+    
+                attn_weights = torch.softmax(scores_local / math.sqrt(self.head_dim), dim=-1)
+                attn_weights = self.dropout(attn_weights)
+    
+                ctx_local = attn_weights @ vh_full
+                head_outs.append(ctx_local)
+    
+        # concat heads: (B, Tq, C)
+        context_local = torch.cat(head_outs, dim=-1)
+    
+        # output projection is per-token; do it locally then gather (less communication)
+        context_local = self.out_proj(context_local)
+    
+        # gather token blocks back to full sequence if tensor-parallel
+        if self.tensor_parallel and _dist_is_initialized():
+            context_full = AllGatherTokens.apply(context_local, self.tp_group)  # (B, T, C)
+            return context_full
+    
+        return context_local
 
 
 #####################################
@@ -741,31 +741,31 @@ class QuantumAttention(nn.Module):
         return math.pi * pe  # radians
 
     def forward(self, data1, data2, pos1=None, pos2=None):
-    """
-    data1,data2: (B, L, n_dim) angles (float32)
-    pos1,pos2: optional (B, L, n_dim) absolute-position angles.
-    """
-    b, s1, _ = data1.shape
-    _, s2, _ = data2.shape
-
-    if pos1 is None or pos2 is None:
-        if self.use_quantum_pos:
-            pos1_ = self.sinusoidal_pos_angles(s1, self.n_dim, data1.device).unsqueeze(0).expand(b, -1, -1)
-            pos2_ = self.sinusoidal_pos_angles(s2, self.n_dim, data2.device).unsqueeze(0).expand(b, -1, -1)
+        """
+        data1,data2: (B, L, n_dim) angles (float32)
+        pos1,pos2: optional (B, L, n_dim) absolute-position angles.
+        """
+        b, s1, _ = data1.shape
+        _, s2, _ = data2.shape
+    
+        if pos1 is None or pos2 is None:
+            if self.use_quantum_pos:
+                pos1_ = self.sinusoidal_pos_angles(s1, self.n_dim, data1.device).unsqueeze(0).expand(b, -1, -1)
+                pos2_ = self.sinusoidal_pos_angles(s2, self.n_dim, data2.device).unsqueeze(0).expand(b, -1, -1)
+            else:
+                pos1_ = torch.zeros((b, s1, self.n_dim), device=data1.device, dtype=torch.float32)
+                pos2_ = torch.zeros((b, s2, self.n_dim), device=data2.device, dtype=torch.float32)
         else:
-            pos1_ = torch.zeros((b, s1, self.n_dim), device=data1.device, dtype=torch.float32)
-            pos2_ = torch.zeros((b, s2, self.n_dim), device=data2.device, dtype=torch.float32)
-    else:
-        pos1_ = pos1
-        pos2_ = pos2
-
-    # Keep everything float32; QuantumFunction itself uses complex64 + float32
-    return QuantumFunction.apply(
-        data1.to(torch.float32), data2.to(torch.float32),
-        pos1_.to(torch.float32), pos2_.to(torch.float32),
-        self.W_query.to(torch.float32), self.W_key.to(torch.float32),
-        self.shift.to(torch.float32),
-    )
+            pos1_ = pos1
+            pos2_ = pos2
+    
+        # Keep everything float32; QuantumFunction itself uses complex64 + float32
+        return QuantumFunction.apply(
+            data1.to(torch.float32), data2.to(torch.float32),
+            pos1_.to(torch.float32), pos2_.to(torch.float32),
+            self.W_query.to(torch.float32), self.W_key.to(torch.float32),
+            self.shift.to(torch.float32),
+        )
 
 
 class QuantumMultiHeadAttention(nn.Module):
