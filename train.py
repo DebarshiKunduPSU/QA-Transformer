@@ -132,9 +132,8 @@ def main():
     torch.cuda.manual_seed_all(1234 + dp_index)
 
     # Download data once
-    file_path = 'the-verdict.txt'
-    url = 'https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt'
-
+    file_path = 'ptb.txt'
+    
     if is_global_main and not os.path.exists(file_path):
         r = requests.get(url, timeout=30)
         r.raise_for_status()
