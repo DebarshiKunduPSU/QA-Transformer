@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from previous_chapters_quantum_dp_tp import GPTModel, GPTDatasetV1, generate_text_simple, set_tensor_parallel_group
+from model import GPTModel, GPTDatasetV1, generate_text_simple, set_tensor_parallel_group
 
 
 def ddp_init():
